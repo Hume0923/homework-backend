@@ -37,7 +37,6 @@ demo:
     points-ttl-seconds: 600
     load-lock-retry: 3
     load-lock-ttl-ms: 3000
-    load-lock-wait-ms: 500
     load-lock-sleep-ms: 50
   mq:
     user-points-topic: user-points-topic

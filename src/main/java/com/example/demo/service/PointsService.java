@@ -1,7 +1,7 @@
 package com.example.demo.service;
 
 import com.example.demo.cache.LeaderboardRedis;
-import com.example.demo.cache.RedisLockHelper;
+import com.example.demo.cache.RedisCacheLoadGuard;
 import com.example.demo.cache.UserTotalPointsRedis;
 import com.example.demo.controller.dto.AddPointsRequest;
 import com.example.demo.controller.dto.LeaderboardEntry;
@@ -39,7 +39,7 @@ public class PointsService {
     private final UserPointsRepository userPointsRepository;
     private final UserTotalPointsRedis userTotalPointsRedis;
     private final LeaderboardRedis leaderboardRedis;
-    private final RedisLockHelper redisLockHelper;
+    private final RedisCacheLoadGuard redisCacheLoadGuard;
     private final ApplicationEventPublisher eventPublisher;
 
     @Value("${demo.cache.load-lock-ttl-ms:3000}")
@@ -47,9 +47,6 @@ public class PointsService {
 
     @Value("${demo.cache.load-lock-retry:3}")
     private int loadLockRetry;
-
-    @Value("${demo.cache.load-lock-wait-ms:500}")
-    private long loadLockWaitMs;
 
     @Value("${demo.cache.load-lock-sleep-ms:50}")
     private long loadLockSleepMs;
@@ -64,16 +61,14 @@ public class PointsService {
         record.setReason(request.getReason());
         PointRecord saved = pointRecordRepository.save(record);
 
-        CachedTotalPoints updated = updateUserPointsWithVersion(
+        updateUserPoints(
                 request.getUserId(),
                 request.getAmount());
-        long total = updated.total();
 
         eventPublisher.publishEvent(new PointsChangedEvent(
                 saved.getUserId(),
                 saved.getId(),
                 saved.getAmount(),
-                total,
                 saved.getReason()));
 
         PointResponse response = new PointResponse();
@@ -81,7 +76,6 @@ public class PointsService {
         response.setUserId(saved.getUserId());
         response.setAmount(saved.getAmount());
         response.setReason(saved.getReason());
-        response.setTotal(total);
         response.setCreatedAt(saved.getCreatedAt() != null ? saved.getCreatedAt() : Instant.now());
         return response;
     }
@@ -96,15 +90,20 @@ public class PointsService {
         }
 
         log.info("[PointsService][getTotalPoints] userId:{} no cache", userId);
-        CachedTotalPoints loaded = redisLockHelper.getOrLoad(
-                userTotalPointsRedis.getKey(userId),
-                () -> userTotalPointsRedis.getCached(userId),
-                cachedValue -> userTotalPointsRedis.setIfNewer(userId, cachedValue),
-                () -> loadFromDb(userId),
-                loadLockRetry,
-                loadLockTtlMs,
-                loadLockWaitMs,
-                loadLockSleepMs);
+        CachedTotalPoints loaded;
+        try {
+            loaded = redisCacheLoadGuard.getOrLoad(
+                    userTotalPointsRedis.getKey(userId),
+                    () -> userTotalPointsRedis.getCached(userId),
+                    cachedValue -> userTotalPointsRedis.set(userId, cachedValue),
+                    () -> loadFromDb(userId),
+                    loadLockRetry,
+                    loadLockTtlMs,
+                    loadLockSleepMs);
+        } catch (IllegalStateException ex) {
+            log.warn("[PointsService][getTotalPoints] cache wait timeout, fallback to db userId={}", userId);
+            loaded = loadFromDb(userId);
+        }
         long total = loaded == null ? 0L : loaded.total();
 
         TotalPointsResponse response = new TotalPointsResponse();
@@ -132,7 +131,6 @@ public class PointsService {
         return results;
     }
 
-    @Transactional
     public UpdateReasonResponse updateReason(Long id, UpdateReasonRequest request) {
         if (request == null || request.getReason() == null || request.getReason().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "reason is required");
@@ -176,31 +174,14 @@ public class PointsService {
     private CachedTotalPoints loadFromDb(String userId) {
         Optional<UserPoints> userPoints = userPointsRepository.findById(userId);
         if (userPoints.isEmpty()) {
-            return new CachedTotalPoints(0L, 0L);
+            return new CachedTotalPoints(0L);
         }
         UserPoints data = userPoints.get();
-        return new CachedTotalPoints(data.getTotalPoints(), data.getVersion());
+        return new CachedTotalPoints(data.getTotalPoints());
     }
 
-    private CachedTotalPoints updateUserPointsWithVersion(String userId, long amount) {
-        for (int attempt = 1; attempt <= loadLockRetry; attempt++) {
-            Optional<UserPoints> existing = userPointsRepository.findById(userId);
-            if (existing.isEmpty()) {
-                int inserted = userPointsRepository.insertNew(userId, amount);
-                if (inserted > 0) {
-                    return new CachedTotalPoints(amount, 1L);
-                }
-                continue;
-            }
-            UserPoints current = existing.get();
-            long currentVersion = current.getVersion() == null ? 0L : current.getVersion();
-            int updated = userPointsRepository.updateAddPointsWithVersion(userId, amount, currentVersion);
-            if (updated > 0) {
-                long newTotal = (current.getTotalPoints() == null ? 0L : current.getTotalPoints()) + amount;
-                return new CachedTotalPoints(newTotal, currentVersion + 1);
-            }
-        }
-        throw new ResponseStatusException(HttpStatus.CONFLICT, "failed to update points due to version conflict");
+    private void updateUserPoints(String userId, long amount) {
+        userPointsRepository.upsertAddPoints(userId, amount);
     }
 
 }

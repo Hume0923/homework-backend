@@ -1,6 +1,7 @@
 package com.example.demo.event;
 
 import com.example.demo.cache.LeaderboardRedis;
+import com.example.demo.cache.RedisCacheLoadGuard;
 import com.example.demo.cache.UserTotalPointsRedis;
 import com.example.demo.mq.RocketMqProducer;
 import com.example.demo.mq.event.UserPointsEvent;
@@ -21,6 +22,7 @@ import org.springframework.http.HttpStatus;
 public class PointsEventListener {
 
     private final UserTotalPointsRedis userTotalPointsRedis;
+    private final RedisCacheLoadGuard redisCacheLoadGuard;
     private final LeaderboardRedis leaderboardRedis;
     private final RocketMqProducer rocketMqProducer;
     private final ObjectMapper objectMapper;
@@ -28,14 +30,22 @@ public class PointsEventListener {
     @Value("${demo.mq.user-points-topic}")
     private String userPointsTopic;
 
+    @Value("${demo.cache.load-lock-ttl-ms:3000}")
+    private long loadLockTtlMs;
+
+    @Value("${demo.cache.load-lock-retry:3}")
+    private int loadLockRetry;
+
+    @Value("${demo.cache.load-lock-sleep-ms:50}")
+    private long loadLockSleepMs;
+
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onPointsChanged(PointsChangedEvent event) {
-        userTotalPointsRedis.deleteTotal(event.userId());
+        deleteTotalWithLock(event.userId());
         try {
             UserPointsEvent payload = new UserPointsEvent();
             payload.setUserId(event.userId());
             payload.setAmount(event.amount());
-            payload.setTotal(event.total() == null ? 0L : event.total());
             payload.setReason(event.reason());
             payload.setPointId(event.pointId());
             payload.setCreatedAt(Instant.now());
@@ -49,7 +59,16 @@ public class PointsEventListener {
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onPointsDeleted(PointsDeletedEvent event) {
-        userTotalPointsRedis.deleteTotal(event.userId());
+        deleteTotalWithLock(event.userId());
         leaderboardRedis.removeUser(event.userId());
+    }
+
+    private void deleteTotalWithLock(String userId) {
+        redisCacheLoadGuard.withLock(
+                userTotalPointsRedis.getKey(userId),
+                loadLockRetry,
+                loadLockTtlMs,
+                loadLockSleepMs,
+                () -> userTotalPointsRedis.deleteTotal(userId));
     }
 }

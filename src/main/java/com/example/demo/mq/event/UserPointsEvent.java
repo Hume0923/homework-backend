@@ -8,7 +8,6 @@ import java.time.Instant;
 public class UserPointsEvent {
     private String userId;
     private Long amount;
-    private Long total;
     private String reason;
     private Long pointId;
     private Instant createdAt;

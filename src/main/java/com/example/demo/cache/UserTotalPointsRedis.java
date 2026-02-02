@@ -47,12 +47,8 @@ public class UserTotalPointsRedis {
         throw new IllegalStateException("Unexpected value type in Redis: " + value.getClass().getName());
     }
 
-    public void setIfNewer(String userId, CachedTotalPoints cached) {
+    public void set(String userId, CachedTotalPoints cached) {
         if (cached == null) {
-            return;
-        }
-        CachedTotalPoints current = getCached(userId);
-        if (current != null && current.version() >= cached.version()) {
             return;
         }
         try {

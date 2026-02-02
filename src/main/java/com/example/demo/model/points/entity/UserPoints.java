@@ -20,9 +20,6 @@ public class UserPoints {
     @Column(name = "total_points", nullable = false)
     private Long totalPoints;
 
-    @Column(name = "version", nullable = false)
-    private Long version;
-
     @Column(name = "updated_at", nullable = false, insertable = false, updatable = false)
     private Instant updatedAt;
 }

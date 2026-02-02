@@ -10,6 +10,5 @@ public class PointResponse {
     private String userId;
     private Long amount;
     private String reason;
-    private Long total;
     private Instant createdAt;
 }
